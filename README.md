@@ -1,9 +1,6 @@
 buildtasks
 ==========
 
-Samples
--------
-
 To create a table of times and costs from the text file tasks.txt, using the default cost of $0.12/hour:
 ```sh
 perl tasks-txt-csv.pl -i tasks.txt -o tasks.csv
