@@ -3,14 +3,15 @@ use warnings;
 
 my $infile = undef;
 my $outfile = undef;
-my $costPerHour = 0;
+my $costPerHour = {};
 for (my $i = 0; $i < scalar(@ARGV); $i++) {
     if ($ARGV[$i] eq "-i") { $infile = $ARGV[++$i]; }
     elsif ($ARGV[$i] eq "-o") { $outfile = $ARGV[++$i]; }
-    elsif ($ARGV[$i] eq "-c") { $costPerHour = $ARGV[++$i]; }
+    elsif ($ARGV[$i] eq "-c" && $ARGV[$i+1]=~/^(?:(.*):|)([0-9.]+)$/) { $costPerHour->{$1 || ''} = $2*1; $i++; }
+    elsif ($ARGV[$i] eq "-c" && (-f $ARGV[$i+1])) { for my $s (getFileLines($ARGV[$i+1])) { my ($n, $c) = ($s =~/^(.*)\t([0-9.]+)\s*$/) or die("Unhandled line: $s"); $costPerHour->{$1 || ''} = $2*1; } $i++; }
     else { die "Unhandled option: ".$ARGV[$i]; }
 }
-if (!$infile || !$outfile) { print "Usage : $0 -i <input csv file> -o <output html file> [-c <cost per hour>]\n"; exit; }
+if (!$infile || !$outfile) { print "Usage : $0 -i <input csv file> -o <output html file> [-c ([<os> <hw>:]<cost per hour> | <cost file>)]\n"; exit; }
 
 my $data = readCsv($infile);
 
@@ -31,16 +32,33 @@ sub readCsv {
         $line =~s/\s*$//;
         my ($name, $product, $productarch, $hw, $os, $flag, $task, $time) = split(/\t/, $line);
         $time =~s/,/./;
-        push(@{$data}, {'name'=>$name,'hw'=>$hw, 'product'=>$product, 'productarch'=>$productarch, 'os'=>$os, 'flag'=>$flag, 'task'=>$task, 'time'=>$time});
+        push(@{$data}, {'name'=>$name,'hw'=>trim($hw), 'product'=>$product, 'productarch'=>$productarch, 'os'=>trim($os), 'flag'=>$flag, 'task'=>$task, 'time'=>$time});
     }
     $data;
 }
 
+sub trim {
+    my ($s) = @_;
+    $s =~s/^\s+|\s+$//g;
+    return $s;
+}
+
+sub cost {
+    my ($t, $os, $hw) = @_;
+    $os =~s/\s*\(.*//;
+    my $cost = (defined $costPerHour->{"$os $hw"} ? $costPerHour->{"$os $hw"} :
+        (defined $costPerHour->{$os} ? $costPerHour->{$os} :
+        (defined $costPerHour->{$hw} ? $costPerHour->{$hw} :
+        (defined $costPerHour->{''} ? $costPerHour->{''} :
+        0))));
+    return $t/3600*$cost;
+}
+
 sub formattime {
-    my ($t, $header) = @_;
+    my ($t, $cost, $header) = @_;
     my $sec = ($header ? "" : "<small>:%02d</small>");
     return ($t >= 3600 ? sprintf("%d:%02d".$sec, $t/3600, ($t/60)%60, $t%60) : sprintf("%d".$sec, $t/60, $t%60)).
-        ($header && $costPerHour ? sprintf("~\$%01.2f", $t/3600*$costPerHour) : "");
+        ($header && $cost ? sprintf("~\$%01.2f", $cost) : "");
 }
 
 # Try to build a mapping from test-task to build-tasks (i.e. to show who build the thing being tested)
@@ -124,10 +142,9 @@ foreach my $d (@{$data}) {
     if (!$datagroups->{$type}) { $datagroups->{$type} = []; }
     push(@{$datagroups->{$type}}, $d);
 }
-use Data::Dumper;
 foreach my $type ('desktop', 'mobile', 'b2g') {
     # Construct list of columns and rows
-    my ($cols, $rows, $colcount, $rowcount, $cells, $rowtimeflag, $rowtime, $coltime) = ({}, {}, {}, {}, {}, {}, {}, {});
+    my ($cols, $rows, $colcount, $rowcount, $cells, $rowtimeflag, $rowtime, $coltime, $rowcostflag, $rowcost, $colcost) = ({}, {}, {}, {}, {}, {}, {}, {}, {}, {});
     if (!$datagroups->{$type}) { next; }
     foreach my $d (@{$datagroups->{$type}}) {
         my $b = $prodPlatform->{$d->{'product'}."\t".$d->{'productarch'}};
@@ -143,8 +160,10 @@ foreach my $type ('desktop', 'mobile', 'b2g') {
                 $colcount->{join("\t", map { $coltemp->{$_} } (@{$colkeys}[0..$i]))}++;
             }
         }
-        for (my $i = 0; $i < scalar(@{$colkeys}); $i++) {   
-            $coltime->{join("\t", map { $coltemp->{$_} } (@{$colkeys}[0..$i]))} += $d->{'time'};
+        for (my $i = 0; $i < scalar(@{$colkeys}); $i++) {
+            my $key = join("\t", map { $coltemp->{$_} } (@{$colkeys}[0..$i]));
+            $coltime->{$key} += $d->{'time'};
+            $colcost->{$key} += cost($d->{'time'}, $d->{'os'}, $d->{'hw'});
         }
 
         if (!$rows->{$row}) {
@@ -153,6 +172,8 @@ foreach my $type ('desktop', 'mobile', 'b2g') {
         }
         $rowtimeflag->{$d->{'flag'}} += $d->{'time'};
         $rowtime->{$row} += $d->{'time'};
+        $rowcostflag->{$d->{'flag'}} += cost($d->{'time'},$d->{'os'},$d->{'hw'});
+        $rowcost->{$row} += cost($d->{'time'},$d->{'os'},$d->{'hw'});
 
         #if ($cells->{$col."\t".$row}) { print "Dublicate key '".$col."\t".$row."' for:\n'".($cells->{$col."\t".$row}->{'name'}=~s/<table>.*<\/table>|<[^<>]*>//rg)."'\n'".($d->{'name'}=~s/<table>.*<\/table>|<[^<>]*>//rg)."'\n"; }
         $cells->{$col."\t".$row} ||= [];
@@ -169,13 +190,14 @@ foreach my $type ('desktop', 'mobile', 'b2g') {
         foreach my $col (sort keys %{$cols}) {
             my $t = join("\t", map { $cols->{$col}->{$_} } (@{$colkeys}[0..$i]));
             my $s = $cols->{$col}->{$colkeys->[$i]};
-            $s =~s/ (\(.*)/<br><small>$1<\/small>/;
+            my $c = ($i == 3 || $i == 5 ? cost(3600, $cols->{$col}->{$colkeys->[$i]}, $cols->{$col}->{$colkeys->[$i-1]}) : 0);
+            $s =~s/ *(\(.*|)$/<br><small>$1/;
             print FILE ($prevt ne $t ? "<th".(exists $colcount->{$t} ? " colspan=".$colcount->{$t} : "")." class='vert".
                 ($i==0?" bordertop":"").
                 ($i%2==1?" borderbottom":"").
                 ($i==0?" platformbase":($i==1?" platformarch":($i==2||$i==3?" build":" test"))).
                 ($i==2||$i==4?" hw":($i==3||$i==5?" os":""))."'>".
-                "<div>".$s.($i < 2 ? "<br><small>".formattime($coltime->{$t},1)."</small>" : "")."</div>" : "");
+                "<div>".$s.($i < 2 ? formattime($coltime->{$t},$colcost->{$t},1) : ($c ? sprintf(" \$%01.2f/hour", $c) : ""))."</small></div>" : "");
             $prevt = $t;
         }
     }
@@ -186,8 +208,8 @@ foreach my $type ('desktop', 'mobile', 'b2g') {
         my ($flag, $task) = ($rows->{$row}->{'flag'}, $rows->{$row}->{'task'});
         my $isbuild = $task=~/build/;
         print FILE "\n<tr>".
-            ($prevflag ne $flag ? "<th rowspan=".$rowcount->{$flag}.">".$flag."<th class=num rowspan=".$rowcount->{$flag}.">".formattime($rowtimeflag->{$flag},1) : "").
-            "<th".($isbuild?" class=build":"").">".$task."<th colspan=2 class='num ".($isbuild?"build":"")."'>".formattime($rowtime->{$row},1);
+            ($prevflag ne $flag ? "<th rowspan=".$rowcount->{$flag}.">".$flag."<th class=num rowspan=".$rowcount->{$flag}.">".formattime($rowtimeflag->{$flag},$rowcostflag->{$flag},1) : "").
+            "<th".($isbuild?" class=build":"").">".$task."<th colspan=2 class='num ".($isbuild?"build":"")."'>".formattime($rowtime->{$row},$rowcost->{$row},1);
         my $prevt = "";
         foreach my $col (sort keys %{$cols}) {
             my ($hw, $os) = ($cols->{$col}->{'hw'}, $cols->{$col}->{'os'});
